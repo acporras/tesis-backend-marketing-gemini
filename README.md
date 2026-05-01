@@ -224,4 +224,4 @@ El health check en `/health` es utilizado por Railway para verificar el estado d
 
 ## 📄 Licencia
 
-Proyecto académico — Tesis de Maestría. Todos los derechos reservados.
+Proyecto académico — Tesis de Licensiatura. Todos los derechos reservados.

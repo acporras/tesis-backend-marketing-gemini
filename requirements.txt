@@ -1,0 +1,15 @@
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+google-generativeai==0.5.4
+supabase==2.4.3
+pgvector==0.3.2
+langchain==0.1.20
+python-dotenv==1.0.1
+pandas==2.2.2
+numpy==1.26.4
+apscheduler==3.10.4
+faker==24.11.0
+python-multipart==0.0.26
+openpyxl==3.1.5

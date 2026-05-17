@@ -1,6 +1,6 @@
 import json
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
@@ -27,23 +27,20 @@ class Settings(BaseSettings):
 
     # App
     debug: bool = Field(False, alias="DEBUG")
-    allowed_origins: list[str] = Field(
-        default=["http://localhost:3000", "http://localhost:5173"],
+    # Guardado como str para evitar que pydantic-settings v2 haga JSON-decode
+    # antes de que podamos parsearlo. Usar .allowed_origins_list en el código.
+    allowed_origins: str = Field(
+        default="http://localhost:3000,http://localhost:5173",
         alias="ALLOWED_ORIGINS",
     )
 
-    @field_validator("allowed_origins", mode="before")
-    @classmethod
-    def parse_allowed_origins(cls, v):
-        """Acepta JSON array o string separada por comas (Railway-friendly)."""
-        if isinstance(v, list):
-            return v
-        if isinstance(v, str):
-            v = v.strip()
-            if v.startswith("["):
-                return json.loads(v)
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        """Parsea ALLOWED_ORIGINS: acepta JSON array o strings separadas por coma."""
+        v = self.allowed_origins.strip()
+        if v.startswith("["):
+            return json.loads(v)
+        return [origin.strip() for origin in v.split(",") if origin.strip()]
 
     # Scheduler — reactivación nocturna 02:00 Lima (UTC-5 = 07:00 UTC)
     reactivation_cron_hour: int = Field(7, alias="REACTIVATION_CRON_HOUR")

@@ -250,12 +250,13 @@ class OrquestadorGemini:
 
         # j) Resultado
         return {
-            "segmento":         criterios,
-            "tamanio_audiencia": clientes_segmentados,
-            "mensaje":          mensaje,
-            "tipo_campana":     tipo_campana,
-            "tono":             tono,
-            "canal_optimo":     canal_optimo,
+            "segmento":            criterios,
+            "tamanio_audiencia":   tamanio_audiencia,   # estimado por Gemini
+            "clientes_segmentados": clientes_segmentados,  # calculado con I3
+            "mensaje":             mensaje,
+            "tipo_campana":        tipo_campana,
+            "tono":                tono,
+            "canal_optimo":        canal_optimo,
             "metricas": {
                 "tiempo_respuesta_ms": tiempo_respuesta_ms,
                 "tasa_anonimizacion":  tasa_anonimizacion,

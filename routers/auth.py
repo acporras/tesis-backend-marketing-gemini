@@ -63,6 +63,16 @@ async def login(
             status_code=401,
             detail="Usuario no encontrado o inactivo en el sistema",
         )
+
+    # Supabase retorna data=None si .single() no encuentra el registro
+    # (usuario inactivo o no registrado en la tabla usuarios)
+    if not usuario:
+        logger.warning("Usuario inactivo o sin perfil: %s", auth_user.email)
+        raise HTTPException(
+            status_code=401,
+            detail="Usuario no encontrado o inactivo en el sistema",
+        )
+
     logger.info("Login exitoso: usuario=%s rol=%s", usuario["email"], usuario["rol"])
 
     return {

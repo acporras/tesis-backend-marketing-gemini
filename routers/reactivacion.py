@@ -74,7 +74,7 @@ async def listar_detectados(
 
 @router.post("/ejecutar-deteccion")
 async def ejecutar_deteccion(
-    usuario: Annotated[dict, Depends(get_current_user)],
+    coordinador: Annotated[dict, Depends(require_role("coordinador"))],
     db: Annotated[Client, Depends(get_supabase_client)],
     orquestador: Annotated[OrquestadorGemini, Depends(get_orquestador)],
 ):
@@ -83,10 +83,10 @@ async def ejecutar_deteccion(
     Solo coordinadores pueden invocarlo.
     Útil para testing y para forzar la generación fuera del job nocturno.
     """
-    logger.info("usuario=%s ejecuta detección de reactivación manual", usuario["id"])
+    logger.info("coordinador=%s ejecuta detección de reactivación manual", coordinador["id"])
 
     servicio = ReactivacionService(db=db, orquestador=orquestador)
-    resumen  = await servicio.detectar_clientes_inactivos(usuario_id=usuario["id"])
+    resumen  = await servicio.detectar_clientes_inactivos(usuario_id=coordinador["id"])
     return resumen
 
 

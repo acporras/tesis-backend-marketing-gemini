@@ -22,7 +22,7 @@ _META_I3_PRECISION  = 85.0      # precisión segmento ≥ 85 %
 
 @router.get("/resumen")
 async def resumen_metricas(
-    usuario: Annotated[dict, Depends(get_current_user)],
+    coordinador: Annotated[dict, Depends(require_role("coordinador"))],
     db: Annotated[Client, Depends(get_supabase_client)],
 ):
     """

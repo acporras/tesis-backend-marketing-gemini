@@ -210,30 +210,40 @@ class DatasetService:
             n_fi = int(cantidad * pct_fi / total)
             n_re = cantidad - n_on - n_fi  # el resto va a reactivacion
 
+            # Contador secuencial para seeds únicos — evita colisiones de SHA-256
+            _seed_counter = [0]
+
             def _clientes_por_dimension(n: int, dimension: str) -> list[dict]:
-                """Genera n clientes forzando la dimensión dada."""
+                """Genera n clientes únicos forzando la dimensión dada."""
                 clientes = []
-                intentos = 0
-                while len(clientes) < n and intentos < n * 10:
-                    c = generar_cliente(seed=random.randint(0, 999_999))
-                    c["dimension_ciclo_vida"] = dimension  # forzar dimensión
+                while len(clientes) < n:
+                    _seed_counter[0] += 1
+                    c = generar_cliente(seed=_seed_counter[0])
+                    c["dimension_ciclo_vida"] = dimension
                     clientes.append(c)
-                    intentos += 1
                 return clientes
 
-            registros: list[dict] = []
-            registros.extend(_clientes_por_dimension(n_on, "onboarding"))
-            registros.extend(_clientes_por_dimension(n_fi, "fidelizacion"))
-            registros.extend(_clientes_por_dimension(n_re, "reactivacion"))
+            registros_raw: list[dict] = []
+            registros_raw.extend(_clientes_por_dimension(n_on, "onboarding"))
+            registros_raw.extend(_clientes_por_dimension(n_fi, "fidelizacion"))
+            registros_raw.extend(_clientes_por_dimension(n_re, "reactivacion"))
+
+            # Deduplicar globalmente por cliente_id_anonimizado
+            # para que ningún batch envíe dos filas con la misma clave
+            dedup: dict[str, dict] = {}
+            for r in registros_raw:
+                dedup[r["cliente_id_anonimizado"]] = r
+            registros = list(dedup.values())
             random.shuffle(registros)
 
-            # Insertar en batches de 1 000
-            batch_size = 1000
+            # Insertar en batches de 500
+            batch_size = 500
             for i in range(0, len(registros), batch_size):
                 batch = registros[i:i + batch_size]
                 db.table("registros_campania").upsert(
                     batch, on_conflict="cliente_id_anonimizado"
                 ).execute()
+
 
             total_registros_despues = self._get_total_registros(db)
             db.table("dataset_general_cargas").update({

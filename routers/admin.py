@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from typing import Annotated
 from supabase import Client
 from dependencies import get_supabase_client, get_current_user
@@ -9,6 +9,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/dataset", tags=["admin"])
+
+# Estado global de la indexación en curso (en memoria del proceso)
+_indexacion_estado: dict = {
+    "en_curso":  False,
+    "total":     0,
+    "indexados": 0,
+    "errores":   0,
+    "mensaje":   None,
+}
 
 
 def require_admin(usuario: dict = Depends(get_current_user)):
@@ -55,20 +64,20 @@ async def regenerar_sintetico(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── POST /indexar ─────────────────────────────────────────────────────────────
+# ── Tarea de indexación (corre en background) ─────────────────────────────────
 
-@router.post("/indexar")
-async def indexar_embeddings(
-    usuario: dict = Depends(require_admin),
-    db: Client = Depends(get_supabase_client),
-):
+async def _tarea_indexar(supabase_url: str, supabase_key: str) -> None:
     """
-    Genera embeddings vectoriales para todos los registros en registros_campania
-    y los guarda en clientes_embeddings. Necesario para que el RAG funcione.
-    Procesa en batches de 50 para respetar el rate limit de la API de Gemini.
-    Solo coordinadores.
+    Genera embeddings para todos los registros en segundo plano.
+    Actualiza _indexacion_estado en tiempo real para que el frontend pueda
+    consultar el progreso vía GET /estado-indexacion.
     """
+    from supabase import create_client
+    db  = create_client(supabase_url, supabase_key)
     rag = RAGService(db)
+
+    global _indexacion_estado
+    _indexacion_estado.update({"en_curso": True, "indexados": 0, "errores": 0, "mensaje": "Indexando..."})
 
     try:
         resp = db.table("registros_campania").select(
@@ -77,23 +86,17 @@ async def indexar_embeddings(
         ).execute()
         registros = resp.data or []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error leyendo dataset: {str(e)}")
-
-    if not registros:
-        raise HTTPException(
-            status_code=404,
-            detail="No hay registros en el dataset. Carga datos primero."
-        )
+        _indexacion_estado.update({"en_curso": False, "mensaje": f"Error leyendo dataset: {e}"})
+        return
 
     total      = len(registros)
     indexados  = 0
     errores    = 0
-    batch_size = 50   # conservador para respetar RPM de Gemini Embedding
-
-    logger.info("Iniciando indexación RAG de %d registros (usuario=%s)", total, usuario["id"])
+    batch_size = 50
+    _indexacion_estado["total"] = total
 
     for i in range(0, total, batch_size):
-        batch = registros[i:i + batch_size]
+        batch  = registros[i:i + batch_size]
         tareas = []
         for r in batch:
             metadata = {
@@ -104,35 +107,62 @@ async def indexar_embeddings(
                 "productos_activos":      r.get("productos_activos"),
                 "fecha_apertura_cuenta":  r.get("fecha_apertura_cuenta"),
             }
-            tareas.append(
-                rag.indexar_cliente(
-                    cliente_id=r["cliente_id_anonimizado"],
-                    metadata=metadata,
-                    dimension=r.get("dimension_ciclo_vida", "fidelizacion"),
-                )
-            )
+            tareas.append(rag.indexar_cliente(
+                cliente_id=r["cliente_id_anonimizado"],
+                metadata=metadata,
+                dimension=r.get("dimension_ciclo_vida", "fidelizacion"),
+            ))
 
         resultados = await asyncio.gather(*tareas, return_exceptions=True)
         for res in resultados:
             if isinstance(res, Exception):
-                errores += 1
-                logger.warning("Error indexando cliente: %s", res)
+                errores  += 1
+                logger.warning("Error indexando: %s", res)
             else:
                 indexados += 1
 
-        # Pausa entre batches para no saturar el rate limit de embeddings
+        _indexacion_estado["indexados"] = indexados
+        _indexacion_estado["errores"]   = errores
+
         if i + batch_size < total:
             await asyncio.sleep(1.2)
 
-    logger.info(
-        "Indexación completada: %d/%d indexados, %d errores",
-        indexados, total, errores,
-    )
+    _indexacion_estado.update({
+        "en_curso": False,
+        "mensaje":  f"Completado: {indexados}/{total} indexados, {errores} errores.",
+    })
+    logger.info("Indexación finalizada: %d/%d", indexados, total)
+
+
+# ── POST /indexar ─────────────────────────────────────────────────────────────
+
+@router.post("/indexar", status_code=202)
+async def indexar_embeddings(
+    background_tasks: BackgroundTasks,
+    usuario: dict = Depends(require_admin),
+    db: Client = Depends(get_supabase_client),
+):
+    """
+    Inicia la indexación en segundo plano y devuelve 202 inmediatamente.
+    El frontend debe consultar GET /estado-indexacion para ver el progreso.
+    """
+    if _indexacion_estado["en_curso"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya hay una indexación en curso. Consulta /estado-indexacion para ver el progreso."
+        )
+
+    total = db.table("registros_campania").select("id", count="exact").limit(1).execute().count or 0
+    if total == 0:
+        raise HTTPException(status_code=404, detail="No hay registros en el dataset. Carga datos primero.")
+
+    from config import settings
+    background_tasks.add_task(_tarea_indexar, settings.supabase_url, settings.supabase_backend_key)
+
     return {
-        "total":     total,
-        "indexados": indexados,
-        "errores":   errores,
-        "mensaje":   f"RAG listo: {indexados} perfiles indexados correctamente.",
+        "mensaje":  f"Indexación iniciada en segundo plano para {total} registros.",
+        "total":    total,
+        "en_curso": True,
     }
 
 
@@ -143,7 +173,10 @@ async def estado_indexacion(
     usuario: dict = Depends(require_admin),
     db: Client = Depends(get_supabase_client),
 ):
-    """Cuántos clientes están indexados vs el total del dataset."""
+    """
+    Retorna el progreso actual de la indexación (en_curso, indexados, total)
+    más el conteo real de embeddings guardados en clientes_embeddings.
+    """
     try:
         total_dataset   = db.table("registros_campania").select("id", count="exact").limit(1).execute().count or 0
         total_indexados = db.table("clientes_embeddings").select("id", count="exact").limit(1).execute().count or 0
@@ -157,6 +190,11 @@ async def estado_indexacion(
             "porcentaje":        round(total_indexados / total_dataset * 100, 1) if total_dataset else 0,
             "ultima_indexacion": ultima_fecha,
             "rag_listo":         total_indexados > 0,
+            # Progreso en tiempo real de la tarea en curso
+            "en_curso":          _indexacion_estado["en_curso"],
+            "progreso_actual":   _indexacion_estado["indexados"],
+            "progreso_total":    _indexacion_estado["total"],
+            "mensaje_tarea":     _indexacion_estado["mensaje"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -182,9 +220,9 @@ async def obtener_estado(
             origen = last_load.data[0]['origen']
 
         return {
-            "total_registros":    total,
+            "total_registros":      total,
             "ultima_actualizacion": ultima,
-            "origen_actual":      origen,
+            "origen_actual":        origen,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

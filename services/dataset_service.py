@@ -5,8 +5,6 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple, List
 from uuid import UUID
-import subprocess
-import os
 
 class DatasetService:
     FORMATOS_SOPORTADOS = ['csv', 'json', 'xlsx']
@@ -193,30 +191,50 @@ class DatasetService:
         carga_id = res_carga.data[0]['id']
         
         try:
-            # Delete old
+            from services.data_generator import generar_cliente
+            import random
+
+            # Borrar registros anteriores
             db.table("registros_campania").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
             
-            # Call data_generator.py logic
-            # This is simplified. Ideally we import data_generator and call it directly.
-            # But the user might just want us to run the existing seed_data.py or similar.
-            # Assuming data_generator.py exists in root or backend:
-            # Let's run it via python subprocess
-            
-            # We will generate it using a modified seed logic or the existing generator
-            script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts_temporales", "seed_data.py")
-            if not os.path.exists(script_path):
-                 script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "seed_data.py")
-                 
-            # Note: The data_generator.py might be custom. We'll use subprocess to run the generic seed or implement a minimal one
-            env = os.environ.copy()
-            env["GENERATE_COUNT"] = str(cantidad)
-            env["DIST_ONBOARDING"] = str(distribucion.get("onboarding", 0))
-            env["DIST_FIDELIZACION"] = str(distribucion.get("fidelizacion", 0))
-            env["DIST_REACTIVACION"] = str(distribucion.get("reactivacion", 0))
-            
-            # Since seed_data logic isn't fully parametric, we just run the basic seed_data
-            subprocess.run(["python", script_path], env=env, check=True)
-            
+            # Calcular distribución por dimensión
+            pct_on  = distribucion.get("onboarding",   20) / 100
+            pct_fi  = distribucion.get("fidelizacion", 60) / 100
+            pct_re  = distribucion.get("reactivacion", 20) / 100
+            total   = pct_on + pct_fi + pct_re
+            if total == 0:
+                pct_on, pct_fi, pct_re = 0.2, 0.6, 0.2
+                total = 1.0
+
+            n_on = int(cantidad * pct_on / total)
+            n_fi = int(cantidad * pct_fi / total)
+            n_re = cantidad - n_on - n_fi  # el resto va a reactivacion
+
+            def _clientes_por_dimension(n: int, dimension: str) -> list[dict]:
+                """Genera n clientes forzando la dimensión dada."""
+                clientes = []
+                intentos = 0
+                while len(clientes) < n and intentos < n * 10:
+                    c = generar_cliente(seed=random.randint(0, 999_999))
+                    c["dimension_ciclo_vida"] = dimension  # forzar dimensión
+                    clientes.append(c)
+                    intentos += 1
+                return clientes
+
+            registros: list[dict] = []
+            registros.extend(_clientes_por_dimension(n_on, "onboarding"))
+            registros.extend(_clientes_por_dimension(n_fi, "fidelizacion"))
+            registros.extend(_clientes_por_dimension(n_re, "reactivacion"))
+            random.shuffle(registros)
+
+            # Insertar en batches de 1 000
+            batch_size = 1000
+            for i in range(0, len(registros), batch_size):
+                batch = registros[i:i + batch_size]
+                db.table("registros_campania").upsert(
+                    batch, on_conflict="cliente_id_anonimizado"
+                ).execute()
+
             total_registros_despues = self._get_total_registros(db)
             db.table("dataset_general_cargas").update({
                 "estado": "completado",
@@ -225,8 +243,13 @@ class DatasetService:
             
             return {
                 "antes": total_registros_antes,
-                "carga": cantidad,
-                "despues": total_registros_despues
+                "carga": len(registros),
+                "despues": total_registros_despues,
+                "distribucion": {
+                    "onboarding":   n_on,
+                    "fidelizacion": n_fi,
+                    "reactivacion": n_re,
+                }
             }
         except Exception as e:
             db.table("dataset_general_cargas").update({
